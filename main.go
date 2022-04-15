@@ -9,13 +9,16 @@ import (
 type data struct {
 	firstComputation  int
 	secondComputation int
+	thirdComputation  int
 	finalComputation  int
 }
 
 func main() {
 	d := &data{}
 
-	g := graph.NewDAG()
+	scheduler := graph.NewScheduler(nil)
+
+	g := graph.NewDAG(scheduler)
 
 	first := graph.NewNode("computing_first_sum", func(ctx context.Context) error {
 		d.firstComputation = 1 + 1
@@ -28,14 +31,21 @@ func main() {
 		return nil
 	})
 	g.AddNode(second)
-	g.AddEdges(first, second)
+	g.AddEdges(second, first)
+
+	third := graph.NewNode("computing_second_sum", func(ctx context.Context) error {
+		d.thirdComputation = d.firstComputation + 2
+		return nil
+	})
+	g.AddNode(third)
+	g.AddEdges(third, first)
 
 	final := graph.NewNode("computing_final_sum", func(ctx context.Context) error {
-		d.finalComputation = d.secondComputation + 1
+		d.finalComputation = d.secondComputation + d.thirdComputation + 1
 		return nil
 	})
 	g.AddNode(final)
-	g.AddEdges(second, final)
+	g.AddEdges(final, second, third)
 
 	ctx := context.Background()
 
@@ -44,5 +54,5 @@ func main() {
 		panic(err)
 	}
 
-	fmt.Printf("TADA: %d.", d.finalComputation)
+	fmt.Printf("TADA: %d.\n", d.finalComputation)
 }

@@ -6,6 +6,15 @@ import (
 	"sync"
 )
 
+type ComputationError struct {
+	NodeName string
+	Err      error
+}
+
+func (e *ComputationError) Error() string {
+	return e.Err.Error()
+}
+
 type NodeId int64
 
 type Task func(ctx context.Context) error
@@ -45,9 +54,10 @@ type DAG struct {
 	nodes map[NodeId]*nodeInformation
 }
 
-func NewDAG() *DAG {
+func NewDAG(scheduler IScheduler) *DAG {
 	return &DAG{
-		nodes: make(map[NodeId]*nodeInformation),
+		scheduler: scheduler,
+		nodes:     make(map[NodeId]*nodeInformation),
 	}
 }
 
@@ -71,22 +81,31 @@ func (g *DAG) Compute(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	workResultCh := g.scheduler.Start()
+
 	rootIds := g.findRootNodes()
 	for _, rootId := range rootIds {
 		g.scheduleNode(ctx, rootId)
 	}
 
-	workResultCh := g.scheduler.Start()
+	nOfFinishedNodes := 0
 
 	var computeError error
 
 	shutdown := sync.Once{}
 	for finishedWork := range workResultCh {
-		if err := finishedWork.err; err != nil {
-			// Call this only once as we don't want to resetting the error and
+		n := g.nodes[NodeId(finishedWork.Id)]
+		n.node.finished = true
+		nOfFinishedNodes++
+
+		if err := finishedWork.Err; err != nil {
+			// Call this only once as we don't want to be resetting the error and
 			// shutthing down the scheduler multiple times.
 			shutdown.Do(func() {
-				computeError = err
+				computeError = &ComputationError{
+					NodeName: n.node.name,
+					Err:      err,
+				}
 				cancel()
 
 				// Shutdown the scheduler in a goroutine as it's a blocking call and we don't want to block
@@ -95,12 +114,18 @@ func (g *DAG) Compute(ctx context.Context) error {
 			})
 		}
 
-		// Don't schedule new tasks if we have failed.
+		// All nodes of the graph finishes computations and we can stop.
+		if nOfFinishedNodes == len(g.nodes) {
+			go g.scheduler.Shutdown()
+			continue
+		}
+
+		// Don't schedule new tasks if we have failed. Just wait for all the pending ones to finish.
 		if computeError != nil {
 			continue
 		}
 
-		for _, nodeId := range g.nodes[NodeId(finishedWork.Id)].to {
+		for _, nodeId := range n.to {
 			if g.isNodeSchedulable(nodeId) {
 				g.scheduleNode(ctx, nodeId)
 			}
@@ -110,7 +135,7 @@ func (g *DAG) Compute(ctx context.Context) error {
 	return computeError
 }
 
-// Root nodes will have zero `to` dependencies. I.e. there is no edge directed at them.
+// Root nodes will have zero `from` dependencies. I.e. there are no edges directed at them.
 func (g *DAG) findRootNodes() []NodeId {
 	roots := make([]NodeId, 0)
 	for _, n := range g.nodes {
